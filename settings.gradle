@@ -1,0 +1,3 @@
+include ':okhttplogginginterceptor'
+include ':app'
+rootProject.name = "MyOkhttpLoggingInterceptor"
