@@ -8,15 +8,8 @@ https://github.com/square/okhttp/tree/master/okhttp-logging-interceptor
 
 添加依赖
 ```gradle
-allprojects {
-  repositories {
-    ...
-    maven { url 'https://dl.bintray.com/licheedev/maven' }
-  }
-}
-
-  dependencies {
-        implementation 'com.licheedev:okhttplogginginterceptor:1.0.0'
+dependencies {
+  implementation 'com.licheedev:okhttplogginginterceptor:1.0.0'
 }
 ```
 
