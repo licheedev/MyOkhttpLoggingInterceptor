@@ -8,16 +8,16 @@ https://github.com/square/okhttp/tree/master/okhttp-logging-interceptor
 
 添加依赖
 ```gradle
-	allprojects {
-		repositories {
-			...
-			maven { url 'https://dl.bintray.com/licheedev/maven' }
-		}
-	}
-  
-  	dependencies {
-	        implementation 'com.licheedev:okhttplogginginterceptor:1.0.0'
-	}
+allprojects {
+  repositories {
+    ...
+    maven { url 'https://dl.bintray.com/licheedev/maven' }
+  }
+}
+
+  dependencies {
+        implementation 'com.licheedev:okhttplogginginterceptor:1.0.0'
+}
 ```
 
 初始化okhttp(或其他基于okhttp的库)
@@ -28,8 +28,10 @@ builder.addInterceptor(JsonLoggingInterceptor(true,30))
 ...
 ```
 
-定制过滤策略
+可定制定制过滤策略
 ```kotlin
+builder.addInterceptor(MyHttpLogger(true,30))
+// 重写JsonLoggingInterceptor
 class MyHttpLogger(logRequest: Boolean, logJsonLines: Int) :
     JsonLoggingInterceptor(logRequest, logJsonLines) {
 
