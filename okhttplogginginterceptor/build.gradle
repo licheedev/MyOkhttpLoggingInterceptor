@@ -1,16 +1,17 @@
 plugins {
     id 'com.android.library'
     id 'kotlin-android'
+    // 发布到 Maven Central 的插件（com.vanniktech:gradle-maven-publish-plugin）
+    id 'com.vanniktech.maven.publish'
 }
 
 android {
-    compileSdkVersion 30
+    namespace 'com.licheedev.okhttploginterceptor'
+
+    compileSdk 33
 
     defaultConfig {
         minSdkVersion 16
-        targetSdkVersion 30
-        versionCode 1
-        versionName "1.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles "consumer-rules.pro"

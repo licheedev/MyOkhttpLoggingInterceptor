@@ -16,9 +16,43 @@ allprojects {
 }
 
 dependencies {
-  implementation 'com.licheedev:okhttplogginginterceptor:1.0.0'
+  implementation 'com.licheedev:okhttplogginginterceptor:1.0.1'
 }
 ```
+
+## 大文件保护（1.0.1 起）
+
+1.0.0 为了打日志，会对响应体执行 `source.request(Long.MAX_VALUE)`，等于把**整个响应体**
+读进内存。下载几百 MB 的固件包、apk、视频时，会在开始写盘之前就把堆打爆（`OutOfMemoryError`，
+堆栈落在 `okio.RealBufferedSource.request` → `LoggingInterceptor.intercept`）。
+
+1.0.1 起对 body 的读取做了体积保护：
+
+- 只有长度**已知且不超过上限**（默认 256KB）的 body 才会被读进内存；
+- 长度未知（chunked）时，最多只探测 `上限 + 1` 个字节，够到上限就直接放弃；
+- 超限的 body **不读取、不消费**，日志里只留一条摘要，下游仍能读到完整数据：
+
+```
+【HTTP】GET-->https://xxx/firmware.zip
+【HTTP】response(200)-->IGNORE(524288000-byte response body omitted)
+```
+
+上限可按需覆盖（返回值单位为字节）：
+
+```kotlin
+class MyHttpLogger(logRequest: Boolean, logJsonLines: Int) :
+    JsonLoggingInterceptor(logRequest, logJsonLines) {
+
+    /** 响应体超过 1MB 就不记录了 */
+    override fun allowMaxResponseBufferLength(): Long = 1024 * 1024L
+
+    /** 请求体超过 1MB 就不记录了（上传大文件） */
+    override fun allowMaxRequestBufferLength(): Long = 1024 * 1024L
+}
+```
+
+`allowMaxRequestLength()` / `allowMaxResponseLength()` 仍然只控制**打印多少字符**，
+与上面的缓冲上限互不影响。
 
 初始化okhttp(或其他基于okhttp的库)
 ```kotlin

@@ -2,131 +2,71 @@
 def groupIdDefined = "com.licheedev"
 def artifactIdDefined = "okhttplogginginterceptor"
 // 如果是测试版，版本号后面加上 -SNAPSHOT
-def versionDefined = "1.0.0"
+def versionDefined = "1.0.1"
 // 其他信息
-def gitUrl = "https://github.com/licheedev/MyOkhttpLoggingInterceptor"
+def developerPage = "https://github.com/licheedev"
+def gitRepo = "github.com/licheedev/MyOkhttpLoggingInterceptor"
 def libName = "MyOkhttpLoggingInterceptor"
-def libDesc = "MyOkhttpLoggingInterceptor"
+def libDesc = "Custom OkHttp logging interceptor"
 
 // 配置是否上传
 def toUpload = true
 
-//在根build.gradle中加入，最新版本号参考 https://github.com/Kotlin/dokka#using-dokka
-//classpath 'org.jetbrains.dokka:dokka-gradle-plugin:1.4.32'
+//在库build.gradle中加入，最新版本号参考 https://vanniktech.github.io/gradle-maven-publish-plugin/central/
+//plugins {
+//    ...
+//    id "com.vanniktech.maven.publish" version "0.34.0"
+//}
+
+// 在gradle.properties加入
+//mavenCentralPublishing=true
+//signAllPublications=true
 
 //在module的build.gradle末位加入
 //apply from: '../maven_publish.gradle'
 
+// 运行"publishToMavenCentral"任务上传
+// 上传结果在https://central.sonatype.com/publishing/deployments
+
+
 if (toUpload) {
-    apply plugin: 'signing'
-    apply plugin: 'maven-publish'
-    apply plugin: 'org.jetbrains.dokka'
+    mavenPublishing {
+        coordinates("$groupIdDefined", "$artifactIdDefined", "$versionDefined")
 
-    //<editor-fold desc="打包源码和javadoc">
-    // 打包源码
-    task sourcesJar(type: Jar) {
-        from android.sourceSets.main.java.srcDirs
-        classifier = 'sources'
-    }
+        pom {
+            name = "$libName"
+            description = "$libDesc"
+            url = "$gitRepo"
 
-    task javadoc(type: Javadoc) {
-        failOnError false
-        source = android.sourceSets.main.java.sourceFiles
-        options {
-            encoding = "utf-8"
-            charSet 'UTF-8'
-        }
-        classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
-        classpath += configurations.compile
-    }
-
-    // 打包javadoc
-    task javadocJar(type: Jar, dependsOn: javadoc) {
-        classifier = 'javadoc'
-        from javadoc.destinationDir
-    }
-
-    // 打包包含kotlin源码的javadoc
-    task kotlinDocJar(type: Jar, dependsOn: dokkaHtml) {
-        classifier = 'javadoc'
-        from dokkaHtml.outputDirectory
-    }
-    //</editor-fold>
-
-    afterEvaluate {
-
-        publishing {
-            publications {
-                mavenAndroid(MavenPublication) {
-                    from components.release
-
-                    groupId "$groupIdDefined"
-                    artifactId "$artifactIdDefined"
-                    version "$versionDefined"
-                    // 上传source
-                    artifact sourcesJar
-                    // 上传javadoc
-                    if (project.plugins.hasPlugin('kotlin-android')) {
-                        artifact kotlinDocJar
-                    } else {
-                        artifact javadocJar
-                    }
-
-                    pom {
-                        name = "$libName"
-                        description = "$libDesc"
-                        url = "$gitUrl"
-
-                        licenses {
-                            license {
-                                name = 'The MIT License'
-                                url = 'https://opensource.org/licenses/MIT'
-                            }
-                        }
-
-                        //licenses {
-                        //    license {
-                        //        name = 'The Apache License, Version 2.0'
-                        //        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
-                        //    }
-                        //}
-
-                        developers {
-                            developer {
-                                id = 'licheedev'
-                                name = 'John Lee'
-                                email = 'licheedev@foxmail.com'
-                            }
-                        }
-                        scm {
-                            connection = "$gitUrl"
-                            developerConnection = "${gitUrl}.git"
-                            url = "$gitUrl"
-                        }
-                    }
+            licenses {
+                license {
+                    name = "The MIT License"
+                    url = "https://opensource.org/licenses/MIT"
+                    distribution = "https://opensource.org/licenses/MIT"
                 }
             }
 
-            repositories {
+            //licenses {
+            //    license {
+            //        name = "The Apache License, Version 2.0"
+            //        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+            //        distribution = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+            //    }
+            //}
 
-                maven {
-                    // 依赖发布地址
-                    def releasesRepoUrl = "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
-                    def snapshotsRepoUrl = "https://s01.oss.sonatype.org/content/repositories/snapshots/"
-                    url = version.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
-
-                    // 配置账号密码
-                    println "user=${ossrhUsername},key=${ossrhPassword}"
-                    credentials {
-                        username "${ossrhUsername}"
-                        password "${ossrhPassword}"
-                    }
+            developers {
+                developer {
+                    id = "licheedev"
+                    name = "John Lee"
+                    email = "licheedev@foxmail.com"
+                    url = "$developerPage"
                 }
             }
-        }
-
-        signing {
-            sign publishing.publications.mavenAndroid
+            scm {
+                url = "https://${gitRepo}/"
+                connection = "scm:git:git://${gitRepo}.git"
+                developerConnection = "scm:git:ssh://git@${gitRepo}.git"
+            }
         }
     }
 }

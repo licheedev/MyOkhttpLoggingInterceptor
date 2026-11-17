@@ -2,17 +2,18 @@ plugins {
     id 'com.android.application'
     id 'kotlin-android'
 }
-apply plugin: 'kotlin-android-extensions'
 apply plugin: 'kotlin-kapt'
 
 
 android {
-    compileSdkVersion 30
+    namespace 'com.licheedev.myokhttplogginginterceptor'
+
+    compileSdk 33
 
     defaultConfig {
         applicationId "com.licheedev.myokhttplogginginterceptor"
         minSdkVersion 21
-        targetSdkVersion 30
+        targetSdkVersion 33
         versionCode 1
         versionName "1.0"
 

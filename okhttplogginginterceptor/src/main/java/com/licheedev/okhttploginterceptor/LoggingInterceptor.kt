@@ -1,31 +1,66 @@
 package com.licheedev.okhttploginterceptor
 
 import com.licheedev.myutils.LogPlus
-import okhttp3.*
-import okhttp3.internal.http.StatusLine.HTTP_CONTINUE
+import okhttp3.Headers
+import okhttp3.Interceptor
+import okhttp3.MediaType
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody
 import okio.Buffer
 import okio.GzipSource
+import okio.Okio
 import java.io.EOFException
+import java.io.IOException
 import java.io.StringReader
 import java.net.HttpURLConnection
 import java.nio.charset.Charset
 
 /**
  * 日志拦截器
+ *
+ * 读取 body 时做了体积保护，避免大文件（固件包、apk、图片、日志压缩包等）在下载/上传时
+ * 被整个读进内存导致 OOM：
+ *
+ * 1. 只有长度**已知且不超过** [allowMaxRequestBufferLength] / [allowMaxResponseBufferLength]
+ *    的 body 才会被读进内存；
+ * 2. 长度未知（chunked）时，最多只探测 `上限 + 1` 个字节，够到上限就直接放弃；
+ * 3. 超限的 body **不读取、不消费**，只在日志里留一条 `IGNORE(...)` 摘要，下游照常读到完整数据。
+ *
+ * 说明：旧版本对响应体执行 `source.request(Long.MAX_VALUE)`，等于把整个响应体缓冲进内存，
+ * 下载几百 MB 的固件/视频时会在写盘之前就把堆打爆。
+ *
  * @param logRequest 是否打印日志
- * @constructor
  */
 open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
 
     companion object {
         const val TAG = "OkHttpLog"
+
+        /** 请求体/响应体允许读进内存的默认上限（字节） */
+        const val DEFAULT_MAX_BUFFER_LENGTH: Long = 256 * 1024L
+
+        private const val HTTP_CONTINUE = 100
     }
 
-    /** 允许打印请求信息的最大字节数 */
+    /** 允许打印请求信息的最大字符数 */
     protected open fun allowMaxRequestLength(): Long = 512
 
-    /** 允许打印响应信息的最大字节数 */
+    /** 允许打印响应信息的最大字符数 */
     protected open fun allowMaxResponseLength(): Long = 2048
+
+    /**
+     * 允许读进内存的请求体上限（字节）。
+     * 超过该值的请求体（如上传大文件）不会被读取，只打印一条 `IGNORE(...)` 摘要。
+     */
+    protected open fun allowMaxRequestBufferLength(): Long = DEFAULT_MAX_BUFFER_LENGTH
+
+    /**
+     * 允许读进内存的响应体上限（字节）。
+     * 超过该值的响应体（如固件、apk、图片）不会被读取，只打印一条 `IGNORE(...)` 摘要。
+     */
+    protected open fun allowMaxResponseBufferLength(): Long = DEFAULT_MAX_BUFFER_LENGTH
 
     override fun intercept(chain: Interceptor.Chain): Response {
 
@@ -43,59 +78,19 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
 
             val detail = RequestDetail(request.method(), request.url().toString())
 
-            val requestBody = request.body()
-
             // 请求头
             val headers = request.headers()
             if (headers.size() > 0) {
-                val headersMap = mutableMapOf<kotlin.String, kotlin.String>()
+                val headersMap = mutableMapOf<String, String>()
                 for (i in 0 until headers.size()) {
-                    headersMap.put(headers.name(i), headers.value(i))
+                    headersMap[headers.name(i)] = headers.value(i)
                 }
                 detail.headers = headersMap
             }
 
             // 请求参数
-            val paramsContent = StringBuilder()
-
-            if (requestBody == null) {
-                paramsContent.append("NONE")
-            } else if (bodyHasUnknownEncoding(request.headers())) {
-                paramsContent.append("UNKNOWN(encoded body omitted)")
-            } else {
-                val buffer = Buffer()
-                requestBody.writeTo(buffer)
-
-                val contentType = requestBody.contentType()
-                val charset: Charset =
-                    contentType?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
-
-                detail.paramsCharset = charset.name()
-
-                if (buffer.isProbablyUtf8()) {
-                    if (requestBody.contentLength() > allowMaxRequestLength()) {
-                        val temp = buffer.readString(allowMaxRequestLength(), charset)
-                        val index =
-                            temp.indexOf("Content-Length:").let { if (it > -1) it else temp.length }
-                        val nextIndex = temp.indexOf("\r\n", index).let {
-                            if (it > index) it else index
-                        }
-
-                        val text = if (nextIndex > 0) {
-                            temp.substring(0, nextIndex)
-                        } else {
-                            temp
-                        }.replace("\r\n", " | ")
-                        paramsContent.append("$text...")
-                    } else {
-                        paramsContent.append(buffer.readString(charset))
-                    }
-                } else {
-                    paramsContent.append("IGNORE(binary ${requestBody.contentLength()}-byte body omitted)")
-                }
-            }
-
-            detail.params = paramsContent.toString()
+            detail.paramsCharset = charsetOf(request.body()?.contentType()).name()
+            detail.params = parseParams(request)
 
             // 异常
             if (error != null) {
@@ -108,50 +103,8 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
             }
 
             // 响应
-            val responseContent = StringBuilder()
             response!! // 能到这里，就表示已经初始化
-            val responseBody = response.body()
-            // 响应状态码
-            detail.responseCode = response.code()
-
-            if (!response.promisesBody()) {
-                responseContent.append("NONE")
-            } else if (bodyHasUnknownEncoding(response.headers())) {
-                responseContent.append("UNKNOWN(encoded body omitted)")
-            } else if (responseBody != null) {
-                val source = responseBody.source()
-                source.request(Long.MAX_VALUE) // Buffer the entire body.
-                var buffer = source.buffer()
-
-                //var gzippedLength: Long? = null
-                if ("gzip".equals(headers["Content-Encoding"], ignoreCase = true)) {
-                    //gzippedLength = buffer.size()
-                    GzipSource(buffer.clone()).use { gzippedResponseBody ->
-                        buffer = Buffer()
-                        buffer.writeAll(gzippedResponseBody)
-                    }
-                }
-
-                val contentType = responseBody.contentType()
-                val charset: Charset =
-                    contentType?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
-                detail.responseCharset = charset.name()
-
-                if (buffer.isProbablyUtf8() && responseBody.contentLength() != 0L) {
-                    if (buffer.size() > allowMaxResponseLength()) {
-                        responseContent.append(
-                            buffer.clone().readString(allowMaxResponseLength(), charset)
-                        )
-                    } else {
-                        responseContent.append(buffer.clone().readString(charset))
-                    }
-                    detail.isText = true
-                } else {
-                    responseContent.append("IGNORE(binary ${buffer.size()}-byte body omitted)")
-                }
-            }
-            // 响应文本
-            detail.response = responseContent.toString()
+            parseResponse(detail, response)
 
             if (toLog(detail)) {
                 log(detail)
@@ -164,6 +117,184 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
         return response!!
     }
 
+    /** 请求参数（带体积保护，超限则不读取） */
+    private fun parseParams(request: Request): String {
+
+        val requestBody: RequestBody = request.body() ?: return "NONE"
+
+        if (bodyHasUnknownEncoding(request.headers())) {
+            return "UNKNOWN(encoded body omitted)"
+        }
+
+        val contentLength = contentLengthOf(requestBody)
+        val maxBufferLength = allowMaxRequestBufferLength()
+
+        // 长度已知且超限：一个字节都不读
+        if (contentLength > maxBufferLength) {
+            return "IGNORE(request body too large, ${contentLength}-byte omitted)"
+        }
+
+        // 长度未知（流式/分块上传）：不读取，避免整个请求体进入内存
+        if (contentLength < 0L) {
+            return "IGNORE(unknown-length request body omitted)"
+        }
+
+        return try {
+            val buffer = Buffer()
+            requestBody.writeTo(buffer)
+            val charset = charsetOf(requestBody.contentType())
+            if (buffer.isProbablyUtf8()) {
+                buffer.readParamsText(charset)
+            } else {
+                "IGNORE(binary ${contentLength}-byte request body omitted)"
+            }
+        } catch (e: IOException) {
+            "UNKNOWN(error while reading request body: $e)"
+        }
+    }
+
+    /** 把已缓冲的请求体转成文本，过长则截断 */
+    private fun Buffer.readParamsText(charset: Charset): String {
+
+        val text = readString(charset)
+        val maxLength = allowMaxRequestLength().coerceAtLeast(0L)
+        if (text.length <= maxLength) {
+            return text
+        }
+
+        val prefix = text.substring(0, maxLength.toInt())
+        // 被截断的长表单，去掉残缺的 Content-Length 行
+        val index = prefix.indexOf("Content-Length:").let { if (it > -1) it else prefix.length }
+        val nextIndex = prefix.indexOf("\r\n", index).let { if (it > index) it else index }
+        val cut = if (nextIndex > 0) prefix.substring(0, nextIndex) else prefix
+        return cut.replace("\r\n", " | ") + "..."
+    }
+
+    /** 响应内容（带体积保护，超限则不读取） */
+    private fun parseResponse(detail: RequestDetail, response: Response) {
+
+        val responseContent = StringBuilder()
+        // 响应状态码
+        detail.responseCode = response.code()
+
+        val responseBody = response.body()
+
+        when {
+            !response.promisesBody() -> responseContent.append("NONE")
+
+            bodyHasUnknownEncoding(response.headers()) ->
+                responseContent.append("UNKNOWN(encoded body omitted)")
+
+            responseBody == null -> responseContent.append("NONE")
+
+            else -> {
+                val charset = charsetOf(responseBody.contentType())
+                detail.responseCharset = charset.name()
+
+                val text = readResponseText(response, responseBody, charset)
+                if (text != null) {
+                    responseContent.append(text)
+                    detail.isText = true
+                } else {
+                    val length = contentLengthOf(responseBody)
+                    val sizeText = if (length >= 0) "${length}-byte" else "unknown-size"
+                    responseContent.append("IGNORE($sizeText response body omitted)")
+                }
+            }
+        }
+        // 响应文本
+        detail.response = responseContent.toString()
+    }
+
+    /**
+     * 在不超过 [allowMaxResponseBufferLength] 的前提下缓冲响应体并转成文本。
+     *
+     * 返回 null 表示体积超限或内容不是文本，放弃记录；
+     * 无论返回什么，响应体都不会被消费，下游仍能读到完整数据。
+     */
+    private fun readResponseText(
+        response: Response,
+        body: ResponseBody,
+        charset: Charset
+    ): String? {
+
+        val contentLength = contentLengthOf(body)
+        val maxBufferLength = allowMaxResponseBufferLength()
+
+        // 长度已知且超限：一个字节都不读
+        if (contentLength > maxBufferLength) {
+            return null
+        }
+
+        if (contentLength == 0L) {
+            return ""
+        }
+
+        val source = body.source()
+
+        if (contentLength > 0L) {
+            // 长度已知且不超限：预读进 buffer（只填充，不消费）
+            try {
+                source.request(contentLength)
+            } catch (e: IOException) {
+                return null
+            }
+        } else {
+            // 长度未知（chunked）：最多探测 上限+1 个字节；
+            // 够不到上限说明整个 body 已经缓冲完，可以安全记录
+            val enough = try {
+                source.request(maxBufferLength + 1)
+            } catch (e: IOException) {
+                return null
+            }
+            if (enough) {
+                return null
+            }
+        }
+
+        var snapshot: Buffer = source.buffer().clone()
+
+        // 兜底的 gzip 处理（正常情况 BridgeInterceptor 已解压并去掉 Content-Encoding 头）
+        if ("gzip".equals(response.header("Content-Encoding"), ignoreCase = true)) {
+            snapshot = inflate(snapshot) ?: return null
+        }
+
+        if (!snapshot.isProbablyUtf8()) {
+            return null
+        }
+
+        val text = snapshot.readString(charset)
+        val maxLength = allowMaxResponseLength().coerceAtLeast(0L)
+        return if (text.length <= maxLength) text else text.substring(0, maxLength.toInt())
+    }
+
+    /**
+     * 解压 gzip 数据。
+     * 解压结果最多保留 `allowMaxResponseLength() * 4` 个字节，避免压缩比异常的数据把内存撑爆。
+     */
+    private fun inflate(source: Buffer): Buffer? {
+        val maxInflate = allowMaxResponseLength().coerceAtLeast(0L) * 4
+        if (maxInflate <= 0L) {
+            return null
+        }
+        val result = Buffer()
+        return try {
+            GzipSource(source.clone()).use { gzip ->
+                val buffered = Okio.buffer(gzip)
+                var total = 0L
+                while (total < maxInflate) {
+                    val read = buffered.read(result, maxInflate - total)
+                    if (read == -1L) {
+                        break
+                    }
+                    total += read
+                }
+            }
+            result
+        } catch (e: IOException) {
+            null
+        }
+    }
 
     /**
      * 判断是否需要打log
@@ -219,14 +350,15 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
         return sb.toString()
     }
 
-
+    /** 是否为文本内容（只看头部少量字节，不需要整个 body 进内存） */
     private fun Buffer.isProbablyUtf8(): Boolean {
-        try {
+        return try {
             val prefix = Buffer()
-            val byteCount = size().coerceAtMost(64)
-            copyTo(prefix, 0, byteCount)
+            // 数据不足 64 字节时只取实际存在的部分（copyTo 会校验范围，不能直接传 64）
+            val byteCount = size().coerceAtMost(64L)
+            copyTo(prefix, 0L, byteCount)
             for (i in 0 until 16) {
-                if (prefix.exhausted()) {
+                if (prefix.size() == 0L) {
                     break
                 }
                 val codePoint = prefix.readUtf8CodePoint()
@@ -234,12 +366,14 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
                     return false
                 }
             }
-            return true
-        } catch (_: EOFException) {
-            return false // Truncated UTF-8 sequence.
+            true
+        } catch (e: EOFException) {
+            // 数据太短（含空 body），按文本处理
+            true
         }
     }
 
+    /** 响应是否会带 body */
     private fun Response.promisesBody(): Boolean {
         // HEAD requests never yield a body regardless of the response headers.
         if (request().method() == "HEAD") {
@@ -273,9 +407,32 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
     private fun String.toLongOrDefault(defaultValue: Long): Long {
         return try {
             toLong()
-        } catch (_: NumberFormatException) {
+        } catch (e: NumberFormatException) {
             defaultValue
         }
+    }
+
+    /** 取 body 的 Content-Length，取不到（分块/异常）返回 -1 */
+    private fun contentLengthOf(requestBody: RequestBody): Long {
+        return try {
+            requestBody.contentLength()
+        } catch (e: IOException) {
+            -1L
+        }
+    }
+
+    /** 取 body 的 Content-Length，取不到（分块/异常）返回 -1 */
+    private fun contentLengthOf(body: ResponseBody): Long {
+        return try {
+            body.contentLength()
+        } catch (e: IOException) {
+            -1L
+        }
+    }
+
+    /** 取编码，缺省 UTF-8 */
+    private fun charsetOf(contentType: MediaType?): Charset {
+        return contentType?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
     }
 
     private fun bodyHasUnknownEncoding(headers: Headers): Boolean {
@@ -283,5 +440,4 @@ open class LoggingInterceptor(val logRequest: Boolean) : Interceptor {
         return !contentEncoding.equals("identity", ignoreCase = true) &&
                 !contentEncoding.equals("gzip", ignoreCase = true)
     }
-
-} 
+}
